@@ -611,23 +611,82 @@ static void speex_compute_agc(SpeexPreprocessState *st, spx_word16_t Pframe, spx
 }
 #endif
 
-static void preprocess_analysis(SpeexPreprocessState *st, spx_int16_t *x)
+static void get_input_int(SpeexPreprocessState *st, const spx_int16_t *x)
+{
+   int i;
+   int N3 = 2*st->ps_size - st->frame_size;
+   int N4 = st->frame_size - N3;
+
+   /* 'Build' input frame */
+   for (i=0; i<N3; i++)
+      st->frame[i] = st->inbuf[i];
+   for (i=0; i<st->frame_size; i++)
+      st->frame[N3+i] = x[i];
+
+   /* Update inbuf */
+   for (i=0; i<N3; i++)
+      st->inbuf[i] = x[N4+i];
+}
+
+#ifdef FIXED_POINT
+#define FLOAT2WORD FLOAT2INT
+#else
+#define FLOAT2WORD
+#endif
+
+static void get_input_float(SpeexPreprocessState *st, const float *x)
+{
+   int i;
+   int N3 = 2*st->ps_size - st->frame_size;
+   int N4 = st->frame_size - N3;
+
+   /* 'Build' input frame */
+   for (i=0; i<N3; i++)
+      st->frame[i] = FLOAT2WORD(st->inbuf[i]);
+   for (i=0; i<st->frame_size; i++)
+      st->frame[N3+i] = FLOAT2WORD(x[i]);
+
+   /* Update inbuf */
+   for (i=0; i<N3; i++)
+      st->inbuf[i] = FLOAT2WORD(x[N4+i]);
+}
+
+static void set_output_int(const SpeexPreprocessState *st, spx_int16_t *x)
+{
+   int i;
+   int N3 = 2*st->ps_size - st->frame_size;
+   int N4 = st->frame_size - N3;
+
+   /* Perform overlap and add */
+   for (i=0; i<N3; i++)
+   {
+      spx_word32_t sum = ADD32(EXTEND32(st->outbuf[i]), EXTEND32(st->frame[i]));
+      x[i] = WORD2INT(sum);
+   }
+   for (i=0; i<N4; i++)
+      x[N3+i] = st->frame[N3+i];
+}
+
+static void set_output_float(const SpeexPreprocessState *st, float *x)
+{
+   int i;
+   int N3 = 2*st->ps_size - st->frame_size;
+   int N4 = st->frame_size - N3;
+
+   /* Perform overlap and add */
+   for (i=0; i<N3; i++)
+      x[i] = ADD32(EXTEND32(st->outbuf[i]), EXTEND32(st->frame[i]));
+   for (i=0; i<N4; i++)
+      x[N3+i] = st->frame[N3+i];
+}
+
+static void preprocess_analysis(SpeexPreprocessState *st)
 {
    int i;
    int N = st->ps_size;
    int N3 = 2*N - st->frame_size;
    int N4 = st->frame_size - N3;
    spx_word32_t *ps=st->ps;
-
-   /* 'Build' input frame */
-   for (i=0;i<N3;i++)
-      st->frame[i]=st->inbuf[i];
-   for (i=0;i<st->frame_size;i++)
-      st->frame[N3+i]=x[i];
-
-   /* Update inbuf */
-   for (i=0;i<N3;i++)
-      st->inbuf[i]=x[N4+i];
 
    /* Windowing */
    for (i=0;i<2*N;i++)
@@ -719,10 +778,10 @@ EXPORT int speex_preprocess(SpeexPreprocessState *st, spx_int16_t *x, spx_int32_
    return speex_preprocess_run(st, x);
 }
 
-EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
+static int preprocess_run(SpeexPreprocessState *st)
 {
    int i;
-   int M;
+   int M = st->nbands;
    int N = st->ps_size;
    int N3 = 2*N - st->frame_size;
    int N4 = st->frame_size - N3;
@@ -732,14 +791,12 @@ EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
    spx_word16_t beta, beta_1;
    spx_word16_t effective_echo_suppress;
 
-   st->nb_adapt++;
-   if (st->nb_adapt>20000)
-      st->nb_adapt = 20000;
+   if (st->nb_adapt < 20000)
+      st->nb_adapt++;
    st->min_count++;
 
    beta = MAX16(QCONST16(.03,15),DIV32_16(Q15_ONE,st->nb_adapt));
    beta_1 = Q15_ONE-beta;
-   M = st->nbands;
    /* Deal with residual echo if provided */
    if (st->echo_state)
    {
@@ -759,7 +816,7 @@ EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
       for (i=0;i<N+M;i++)
          st->echo_noise[i] = 0;
    }
-   preprocess_analysis(st, x);
+   preprocess_analysis(st);
 
    update_noise_prob(st);
 
@@ -978,16 +1035,6 @@ EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
    for (i=0;i<2*N;i++)
       st->frame[i] = MULT16_16_Q15(st->frame[i], st->window[i]);
 
-   /* Perform overlap and add */
-   for (i=0;i<N3;i++)
-      x[i] = WORD2INT(ADD32(EXTEND32(st->outbuf[i]), EXTEND32(st->frame[i])));
-   for (i=0;i<N4;i++)
-      x[N3+i] = st->frame[N3+i];
-
-   /* Update outbuf */
-   for (i=0;i<N3;i++)
-      st->outbuf[i] = st->frame[st->frame_size+i];
-
    /* FIXME: This VAD is a kludge */
    st->speech_prob = Pframe;
    if (st->vad_enabled)
@@ -1006,18 +1053,42 @@ EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
    }
 }
 
-EXPORT void speex_preprocess_estimate_update(SpeexPreprocessState *st, spx_int16_t *x)
+EXPORT int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x)
+{
+   int i, result;
+   int N3 = 2*st->ps_size - st->frame_size;
+   get_input_int(st, x);
+   result = preprocess_run(st);
+   set_output_int(st, x);
+   /* Update outbuf */
+   for (i=0; i<N3; i++)
+      st->outbuf[i] = st->frame[st->frame_size+i];
+   return result;
+}
+
+EXPORT int speex_preprocess_run_float(SpeexPreprocessState *st, float *x)
+{
+   int i, result;
+   int N3 = 2*st->ps_size - st->frame_size;
+   get_input_float(st, x);
+   result = preprocess_run(st);
+   set_output_float(st, x);
+   /* Update outbuf */
+   for (i=0; i<N3; i++)
+      st->outbuf[i] = st->frame[st->frame_size+i];
+   return result;
+}
+
+static void preprocess_estimate_update(SpeexPreprocessState *st)
 {
    int i;
    int N = st->ps_size;
    int N3 = 2*N - st->frame_size;
-   int M;
+   int M = st->nbands;
    spx_word32_t *ps=st->ps;
 
-   M = st->nbands;
    st->min_count++;
-
-   preprocess_analysis(st, x);
+   preprocess_analysis(st);
 
    update_noise_prob(st);
 
@@ -1029,9 +1100,6 @@ EXPORT void speex_preprocess_estimate_update(SpeexPreprocessState *st, spx_int16
       }
    }
 
-   for (i=0;i<N3;i++)
-      st->outbuf[i] = MULT16_16_Q15(x[st->frame_size-N3+i],st->window[st->frame_size+i]);
-
    /* Save old power spectrum */
    for (i=0;i<N+M;i++)
       st->old_ps[i] = ps[i];
@@ -1040,6 +1108,27 @@ EXPORT void speex_preprocess_estimate_update(SpeexPreprocessState *st, spx_int16
       st->reverb_estimate[i] = MULT16_32_Q15(st->reverb_decay, st->reverb_estimate[i]);
 }
 
+EXPORT void speex_preprocess_estimate_update(SpeexPreprocessState *st, const spx_int16_t *x)
+{
+   int i;
+   int N3 = 2*st->ps_size - st->frame_size;
+   int N4 = st->frame_size - N3;
+   get_input_int(st, x);
+   preprocess_estimate_update(st);
+   for (i=0; i<N3; i++)
+      st->outbuf[i] = MULT16_16_Q15(x[N4+i], st->window[st->frame_size+i]);
+}
+
+EXPORT void speex_preprocess_estimate_update_float(SpeexPreprocessState *st, const float *x)
+{
+   int i;
+   int N3 = 2*st->ps_size - st->frame_size;
+   int N4 = st->frame_size - N3;
+   get_input_float(st, x);
+   preprocess_estimate_update(st);
+   for (i=0; i<N3; i++)
+      st->outbuf[i] = MULT16_16_Q15(FLOAT2WORD(x[N4+i]), st->window[st->frame_size+i]);
+}
 
 EXPORT int speex_preprocess_ctl(SpeexPreprocessState *state, int request, void *ptr)
 {

@@ -76,6 +76,13 @@ void speex_preprocess_state_destroy(SpeexPreprocessState *st);
 */
 int speex_preprocess_run(SpeexPreprocessState *st, spx_int16_t *x);
 
+/** Preprocess a frame
+ * @param st Preprocessor state
+ * @param x Audio sample vector (in and out). Must be same size as specified in speex_preprocess_state_init().
+ * @return Bool value for voice activity (1 for speech, 0 for noise/silence), ONLY if VAD turned on.
+*/
+int speex_preprocess_run_float(SpeexPreprocessState *st, float *x);
+
 /** Preprocess a frame (deprecated, use speex_preprocess_run() instead)*/
 int speex_preprocess(SpeexPreprocessState *st, spx_int16_t *x, spx_int32_t *echo);
 
@@ -83,7 +90,13 @@ int speex_preprocess(SpeexPreprocessState *st, spx_int16_t *x, spx_int32_t *echo
  * @param st Preprocessor state
  * @param x Audio sample vector (in only). Must be same size as specified in speex_preprocess_state_init().
 */
-void speex_preprocess_estimate_update(SpeexPreprocessState *st, spx_int16_t *x);
+void speex_preprocess_estimate_update(SpeexPreprocessState *st, const spx_int16_t *x);
+
+/** Update preprocessor state, but do not compute the output
+ * @param st Preprocessor state
+ * @param x Audio sample vector (in only). Must be same size as specified in speex_preprocess_state_init().
+*/
+void speex_preprocess_estimate_update_float(SpeexPreprocessState *st, const float *x);
 
 /** Used like the ioctl function to control the preprocessor parameters
  * @param st Preprocessor state

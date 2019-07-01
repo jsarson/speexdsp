@@ -36,21 +36,42 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifdef FIXED_POINT
+#include <arm_neon.h>
+
 #if defined(__aarch64__)
-static inline int32_t saturate_32bit_to_16bit(int32_t a) {
+static __inline int32_t saturate_float_to_16bit(float a)
+{
     int32_t ret;
-    asm ("fmov s0, %w[a]\n"
-         "sqxtn h0, s0\n"
-         "sxtl v0.4s, v0.4h\n"
-         "fmov %w[ret], s0\n"
+    asm ("fcvtas s1, %s[a]\n"
+         "sqxtn h1, s1\n"
+         "sxtl v1.4s, v1.4h\n"
+         "fmov %w[ret], s1\n"
          : [ret] "=r" (ret)
-         : [a] "r" (a)
-         : "v0" );
+         : [a] "w" (a)
+         : "v1");
     return ret;
 }
-#elif defined(__thumb2__)
-static inline int32_t saturate_32bit_to_16bit(int32_t a) {
+#else
+static __inline int32_t saturate_float_to_16bit(float a)
+{
+    int32_t ret;
+    asm ("vmov.f32 d0[0], %[a]\n"
+         "vcvt.s32.f32 d0, d0, #15\n"
+         "vqrshrn.s32 d0, q0, #15\n"
+         "vmov.s16 %[ret], d0[0]\n"
+         : [ret] "=&r" (ret)
+         : [a] "r" (a)
+         : "q0");
+    return ret;
+}
+#endif
+
+#ifdef FIXED_POINT
+#if 0
+/* currently unused */
+#ifdef __thumb2__
+static __inline int32_t saturate_32bit_to_16bit(int32_t a)
+{
     int32_t ret;
     asm ("ssat %[ret], #16, %[a]"
          : [ret] "=r" (ret)
@@ -59,7 +80,8 @@ static inline int32_t saturate_32bit_to_16bit(int32_t a) {
     return ret;
 }
 #else
-static inline int32_t saturate_32bit_to_16bit(int32_t a) {
+static __inline int32_t saturate_32bit_to_16bit(int32_t a)
+{
     int32_t ret;
     asm ("vmov.s32 d0[0], %[a]\n"
          "vqmovn.s32 d0, q0\n"
@@ -70,13 +92,20 @@ static inline int32_t saturate_32bit_to_16bit(int32_t a) {
     return ret;
 }
 #endif
-#undef WORD2INT
-#define WORD2INT(x) (saturate_32bit_to_16bit(x))
 
-#define OVERRIDE_INNER_PRODUCT_SINGLE
-/* Only works when len % 4 == 0 and len >= 4 */
+#define WORD2INT(a) saturate_32bit_to_16bit(a)
+#endif
+
+static void convert_input_neon(spx_int16_t *out, const float *in, unsigned len, unsigned istride)
+{
+    unsigned j;
+    for (j=0; j<len; j++)
+        out[j] = saturate_float_to_16bit(in[j*istride]);
+}
+
+/* Only works when len % 4 == 0 */
 #if defined(__aarch64__)
-static inline int32_t inner_product_single(const int16_t *a, const int16_t *b, unsigned int len)
+static int32_t inner_product_single_asimd(const int16_t *a, const int16_t *b, unsigned int len)
 {
     int32_t ret;
     uint32_t remainder = len % 16;
@@ -131,10 +160,10 @@ static inline int32_t inner_product_single(const int16_t *a, const int16_t *b, u
     return ret;
 }
 #else
-static inline int32_t inner_product_single(const int16_t *a, const int16_t *b, unsigned int len)
+static int32_t inner_product_single_neon(const int16_t *a, const int16_t *b, unsigned int len)
 {
     int32_t ret;
-    uint32_t remainder = len % 16;
+    uint32_t remainder = len & 15;
     len = len - remainder;
 
     asm volatile ("	 cmp %[len], #0\n"
@@ -186,42 +215,20 @@ static inline int32_t inner_product_single(const int16_t *a, const int16_t *b, u
 
     return ret;
 }
-#endif  // !defined(__aarch64__)
-
-#elif defined(FLOATING_POINT)
-#if defined(__aarch64__)
-static inline int32_t saturate_float_to_16bit(float a) {
-    int32_t ret;
-    asm ("fcvtas s1, %s[a]\n"
-         "sqxtn h1, s1\n"
-         "sxtl v1.4s, v1.4h\n"
-         "fmov %w[ret], s1\n"
-         : [ret] "=r" (ret)
-         : [a] "w" (a)
-         : "v1");
-    return ret;
-}
-#else
-static inline int32_t saturate_float_to_16bit(float a) {
-    int32_t ret;
-    asm ("vmov.f32 d0[0], %[a]\n"
-         "vcvt.s32.f32 d0, d0, #15\n"
-         "vqrshrn.s32 d0, q0, #15\n"
-         "vmov.s16 %[ret], d0[0]\n"
-         : [ret] "=r" (ret)
-         : [a] "r" (a)
-         : "q0");
-    return ret;
-}
 #endif
 
-#undef WORD2INT
-#define WORD2INT(x) (saturate_float_to_16bit(x))
+#elif defined(FLOATING_POINT)
 
-#define OVERRIDE_INNER_PRODUCT_SINGLE
-/* Only works when len % 4 == 0 and len >= 4 */
+static void convert_output_neon(spx_int16_t *out, const float *in, unsigned len, unsigned ostride)
+{
+    unsigned j;
+    for (j=0; j<len; j++)
+        out[j*ostride] = saturate_float_to_16bit(in[j]);
+}
+
+/* Only works when len % 4 == 0 */
 #if defined(__aarch64__)
-static inline float inner_product_single(const float *a, const float *b, unsigned int len)
+static float inner_product_single_asimd(const float *a, const float *b, unsigned int len)
 {
     float ret;
     uint32_t remainder = len % 16;
@@ -276,10 +283,10 @@ static inline float inner_product_single(const float *a, const float *b, unsigne
     return ret;
 }
 #else
-static inline float inner_product_single(const float *a, const float *b, unsigned int len)
+static float inner_product_single_neon(const float *a, const float *b, unsigned int len)
 {
     float ret;
-    uint32_t remainder = len % 16;
+    uint32_t remainder = len & 15;
     len = len - remainder;
 
     asm volatile ("	 cmp %[len], #0\n"
@@ -335,5 +342,6 @@ static inline float inner_product_single(const float *a, const float *b, unsigne
 		    "q4", "q5", "q6", "q7", "q8", "q9", "q10", "q11");
     return ret;
 }
-#endif  // defined(__aarch64__)
+#endif
+
 #endif
